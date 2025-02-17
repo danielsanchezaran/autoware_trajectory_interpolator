@@ -65,6 +65,11 @@ void interpolate_trajectory(
  */
 rclcpp::Logger get_logger();
 
+void resample_with_time(TrajectoryPoints & input_trajectory, const double dt);
+
+geometry_msgs::msg::Pose lerp_by_pose(
+  const geometry_msgs::msg::Pose & p1, const geometry_msgs::msg::Pose & p2, const float t);
+
 /**
  * @brief Removes invalid points from the input trajectory.
  *

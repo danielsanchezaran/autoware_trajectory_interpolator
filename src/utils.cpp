@@ -16,12 +16,89 @@
 
 #include "autoware/trajectory_interpolator/trajectory_interpolator_structs.hpp"
 
+#include <autoware/universe_utils/geometry/geometry.hpp>
+#include <rclcpp/duration.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <iterator>
+#include <limits>
+
 namespace autoware::trajectory_interpolator::utils
 {
 
 rclcpp::Logger get_logger()
 {
   return rclcpp::get_logger("trajectory_interpolator");
+}
+
+void resample_with_time(TrajectoryPoints & input_trajectory, const double dt)
+{
+  if (dt < 1e-2) {
+    RCLCPP_ERROR(get_logger(), "dt is too low for resampling with time");
+    return;
+  }
+
+  if (input_trajectory.size() < 2) {
+    RCLCPP_ERROR(get_logger(), "No enough points in for time resampling");
+    return;
+  }
+
+  auto lerp = [](const double val1, const double val2, const double ratio) -> double {
+    return ratio * (val2 - val1) + val1;
+  };
+
+  auto n_samples = (input_trajectory.back().time_from_start.sec +
+                    input_trajectory.back().time_from_start.nanosec * 1e-9) /
+                   dt;
+
+  TrajectoryPoints resampled_points{input_trajectory.front()};
+  resampled_points.reserve(static_cast<size_t>(n_samples));
+
+  auto curr_time = 0.0;
+  std::cerr << "IM here\n";
+  for (auto curr_itr = input_trajectory.begin(); curr_itr < input_trajectory.end(); curr_itr++) {
+    const auto & last_point = resampled_points.back();
+    auto distance_between_points_m =
+      autoware::universe_utils::calcDistance2d(last_point.pose.position, curr_itr->pose.position);
+    const auto velocity_mps = curr_itr->longitudinal_velocity_mps;
+
+    if (velocity_mps * dt > distance_between_points_m) continue;
+
+    auto d = 0.0;
+    do {
+      d += velocity_mps * dt;
+      auto ratio = d / distance_between_points_m;
+      auto pose = lerp_by_pose(last_point.pose, curr_itr->pose, ratio);
+      auto p = *curr_itr;
+
+      p.pose = pose;
+      p.time_from_start.sec = static_cast<int>(curr_time);
+      p.time_from_start.nanosec = static_cast<int>((curr_time - static_cast<int>(curr_time)) * 1e9);
+      p.heading_rate_rps = lerp(last_point.heading_rate_rps, curr_itr->heading_rate_rps, ratio);
+      resampled_points.push_back(p);
+      curr_time += dt;
+    } while (d < distance_between_points_m + std::numeric_limits<double>::epsilon());
+    if (d > distance_between_points_m) curr_itr++;
+  }
+  input_trajectory = resampled_points;
+}
+
+// apply linear interpolation to position
+geometry_msgs::msg::Pose lerp_by_pose(
+  const geometry_msgs::msg::Pose & p1, const geometry_msgs::msg::Pose & p2, const float t)
+{
+  tf2::Transform tf_transform1, tf_transform2;
+  tf2::fromMsg(p1, tf_transform1);
+  tf2::fromMsg(p2, tf_transform2);
+  const auto & tf_point = tf2::lerp(tf_transform1.getOrigin(), tf_transform2.getOrigin(), t);
+
+  geometry_msgs::msg::Pose pose;
+  pose.position.x = tf_point.getX();
+  pose.position.y = tf_point.getY();
+  pose.position.z = tf_point.getZ();
+  pose.orientation = p1.orientation;
+  return pose;
 }
 
 void remove_invalid_points(TrajectoryPoints & input_trajectory)
@@ -172,6 +249,12 @@ void interpolate_trajectory(
   filter_velocity(traj_points, initial_motion, params, smoother, current_odometry);
   // Recalculate timestamps
   motion_utils::calculate_time_from_start(traj_points, current_odometry.pose.pose.position);
+  std::for_each(traj_points.begin(), traj_points.end(), [](const auto & a) {
+    auto t = static_cast<double>(a.time_from_start.sec) +
+             static_cast<double>(a.time_from_start.nanosec) * 1e-9;
+    std::cerr << "time from start " << t << "\n";
+  });
+  // resample_with_time(traj_points, 0.1);
 
   if (traj_points.size() < 2) {
     RCLCPP_ERROR(get_logger(), "No enough points in trajectory after overlap points removal");
